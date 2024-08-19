@@ -1,6 +1,6 @@
 # NY-electricity-load-prediction
 
-Using Gradient Boosting Regressor to predict electricity load of 'Captial' zone in New York State.
+Using Gradient Boosting Regressor to predict electricity load of 'Capital' zone in New York State.
 
 # Data source:
 
