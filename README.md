@@ -4,8 +4,18 @@ Using Gradient Boosting Regressor to predict electricity load of 'Captial' zone 
 
 # Data source:
 
-Historic load data: NYISO
+Historical load data: NYISO
 
-Historic weather data: Wunderground
+Historical weather data: Wunderground
 
-![下载](https://github.com/user-attachments/assets/66a7c02e-d4b0-4cef-9194-1fdf249ac541)
+Training data: Electricity load & Temperature from 2011-2019
+
+Testing data: Electricity load & Temperature in 2020
+
+# Features:
+*Temperature
+*Minute
+*Day of year
+*Day of week
+*Year
+![5](https://github.com/user-attachments/assets/2557ae92-e0fe-4e8c-947a-2e0cf630d627)
