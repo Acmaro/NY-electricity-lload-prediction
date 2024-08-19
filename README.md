@@ -2,7 +2,7 @@
 
 Using Gradient Boosting Regressor to predict electricity load of 'Captial' zone in New York State.
 
-#Data source:
+# Data source:
 Historic load data: NYISO
 Historic weather data: Wunderground
 
