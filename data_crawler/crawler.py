@@ -37,6 +37,12 @@ if __name__ == "__main__":
             print(f'Data points for {year}-{month}: {len(data["observations"])}')
 
             for observation in data['observations']:
-                f.write(','.join([str(observation[field]) for field in interested_fields]) + '\n')
+                values = []
+                for field in interested_fields:
+                    if field == 'valid_time_gmt':
+                        values.append(datetime.datetime.fromtimestamp(observation[field]).strftime('%Y-%m-%d %H:%M'))
+                    else:
+                        values.append(str(observation[field]))
+                f.write(','.join(values) + '\n')
 
     print(f'Done')
