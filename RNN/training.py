@@ -72,7 +72,7 @@ def NYISO_load_download(year):
         if file.endswith('pal.csv'):
             csvs.append(file)
     
-    fout = open(f'data/nyiso/all/load_{year}.csv','a')
+    fout = open(f'data/nyiso/all/load_{year}.csv','w')
     for line in open(f'data/nyiso/{year}/unziped/'+csvs[0]):
         fout.write(line)
         # print(line)
@@ -85,7 +85,7 @@ def NYISO_load_download(year):
     fout.close()
     
     df = pd.read_csv(f'data/nyiso/all/load_{year}.csv')
-                        
+
     cols = df.columns
     df.columns = [col.lower().replace(' ','') for col in cols]
     df = df[['timestamp','name','ptid','load']]
@@ -166,7 +166,7 @@ class TimestampTransformer(BaseEstimator, TransformerMixin):
         X = X.copy()
 
         X['timestamp'] = pd.to_datetime(X['timestamp'])
-        X['is_workday'] = X['timestamp'].apply(lambda x: is_workday(x.date()))
+        X['is_workday'] = X['timestamp'].apply(is_workday)
         X['year'] = X['timestamp'].dt.year
         X['month'] = X['timestamp'].dt.month
         X['day'] = X['timestamp'].dt.day
@@ -252,7 +252,7 @@ def data_preprocess(year):
     weather = weather.rename(columns={"valid_time_gmt": "timestamp"})
     
     weather['timestamp'] = pd.to_datetime(weather['timestamp'])
-    loads['timestamp'] = pd.to_datetime(['timestamp'])
+    loads['timestamp'] = pd.to_datetime(loads['timestamp'])
     
     def find_nearest(group, match, groupname):
         nbrs = NearestNeighbors(n_neighbors=1).fit(match['timestamp'].values[:, None])
@@ -281,28 +281,28 @@ class SimpleLSTM(nn.Module):
         
         self.fc = nn.Linear(hidden_size, output_size)
     
-    def _initialize_weights(self, num_features):
-        # According to the paper, https://arxiv.org/pdf/1912.10454
-        #   we want to preserve the variance through layers.
-        # As a simplified approach:
-        # - Set all biases to zero
-        # - Initialize input-to-hidden weights with a variance ~ 1/N, where N is the number of features
-        # - Initialize hidden-to-hidden weights orthogonally or with a small variance
+    # def _initialize_weights(self, num_features):
+    #     # According to the paper, https://arxiv.org/pdf/1912.10454
+    #     #   we want to preserve the variance through layers.
+    #     # As a simplified approach:
+    #     # - Set all biases to zero
+    #     # - Initialize input-to-hidden weights with a variance ~ 1/N, where N is the number of features
+    #     # - Initialize hidden-to-hidden weights orthogonally or with a small variance
         
-        for name, param in self.lstm.named_parameters():
-            if 'bias' in name:
-                nn.init.zeros_(param)
-            elif 'weight_ih' in name:
-                # Input to hidden weights: normal with std ~ 1/sqrt(num_features)
-                nn.init.normal_(param, mean=0.0, std=(1.0 / np.sqrt(num_features)))
-            elif 'weight_hh' in name:
-                # Hidden to hidden weights: orthogonal initialization can help stability
-                nn.init.orthogonal_(param)
+    #     for name, param in self.lstm.named_parameters():
+    #         if 'bias' in name:
+    #             nn.init.zeros_(param)
+    #         elif 'weight_ih' in name:
+    #             # Input to hidden weights: normal with std ~ 1/sqrt(num_features)
+    #             nn.init.normal_(param, mean=0.0, std=(1.0 / np.sqrt(num_features)))
+    #         elif 'weight_hh' in name:
+    #             # Hidden to hidden weights: orthogonal initialization can help stability
+    #             nn.init.orthogonal_(param)
 
-        # For the fully connected layer
-        nn.init.zeros_(self.fc.bias)
-        # Xavier is a reasonable choice for the final layer
-        nn.init.xavier_normal_(self.fc.weight)
+    #     # For the fully connected layer
+    #     nn.init.zeros_(self.fc.bias)
+    #     # Xavier is a reasonable choice for the final layer
+    #     nn.init.xavier_normal_(self.fc.weight)
 
     def forward(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
@@ -332,40 +332,6 @@ class SimpleGRU(nn.Module):
         out = self.fc(out)
         
         return out
-
-import matplotlib.pyplot as plt
-
-def evaluate_metrics(real_values, predictions): 
-    ''' 
-    Calculate evaluation metrics: MAE, MAPE, and R-squared. 
-
-    Parameters 
-    ---------- 
-
-    real_values (array-like): The actual values. 
-    predictions (array-like): The predicted values. 
-
-    Returns 
-    ------- 
-    mae, mape, r_squared
-    ''' 
-
-    real_values = np.array(real_values) 
-    predictions = np.array(predictions) 
-
-    # Mean Absolute Error (MAE) 
-    mae = np.mean(np.abs(real_values - predictions)) 
-
-    # Mean Absolute Percentage Error (MAPE) 
-    epsilon = 1e-6
-    mape = np.mean(np.abs((real_values - predictions) / (real_values + epsilon))) * 100
-
-    # R-squared 
-    ss_res = np.sum((real_values - predictions) ** 2) 
-    ss_tot = np.sum((real_values - np.mean(real_values)) ** 2) 
-    r_squared = 1 - (ss_res / ss_tot)
-
-    return mae, mape, r_squared
 
 def model_evaluation(model, criterion, data_loader, device='cpu'):
 
@@ -474,42 +440,44 @@ if __name__ == "__main__":
     lr_rate = 1e-4
     weight_decay = 1e-4
 
-    # year_list = [2016, 2017, 2018, 2019, 2020]
+    year_list = [2015, 2016, 2017, 2018, 2019, 2020]
     
-    # print('NYISO load data downloading...')
-    # for year in year_list:
-    #     NYISO_load_download(year)
-    # print('Weather data downloading...')
-    # for year in year_list:
-    #     download_weather_data(year)
-    # print('Combining load and weather data...')
+    print('NYISO load data downloading...')
+    for year in year_list:
+        NYISO_load_download(year)
+    print('Weather data downloading...')
+    for year in year_list:
+        download_weather_data(year)
+    print('Combining load and weather data...')
     
-    # df_list = []
-    # for year in year_list:
-    #     df = data_preprocess(year)
-    #     df_list.append(df)
-
-    # df_train = pd.concat(df_list[:-1], axis=0, ignore_index=True)
-    # df_test = df_list[-1]
-    # del df_list, df
-
-    # df_train = pd.read_csv('train_data.csv')
-    # df_test = pd.read_csv('test_data.csv')
-
-    init_year = 2019
-    end_year = 2019 # inclusive
-
-    print('Reading training data...')
     df_list = []
-    for year in range(init_year, end_year + 1):
-        df = pd.read_csv(r"C:\Users\zhaor\OneDrive - McMaster University\COMPSCI 4AL3\Final Project\NY-electricity-load-prediction\data\Prepared data\{}_features.csv".format(str(year)))
+    for year in year_list:
+        df = data_preprocess(year)
         df_list.append(df)
-    df_train = pd.concat(df_list, axis=0, ignore_index=True)
 
-    print('Reading test data...')
-    df_test_raw = pd.read_csv(r"C:\Users\zhaor\OneDrive - McMaster University\COMPSCI 4AL3\Final Project\NY-electricity-load-prediction\data\Prepared data\2020_features.csv")
-    df_test = df_test_raw[['timestamp', 'load', 'temp']].copy()
-    del df_list, df, df_test_raw
+    df_train = pd.concat(df_list[:-1], axis=0, ignore_index=True)
+    df_test = df_list[-1]
+    del df_list, df
+
+    # df_train.to_csv('train_data.csv', index=False)
+    # df_test.to_csv('test_data.csv', index=False)
+
+    # init_year = 2015
+    # end_year = 2019 # inclusive
+
+    # print('Reading training data...')
+    # df_list = []
+    # for year in range(init_year, end_year + 1):
+    #     df = pd.read_csv(r"C:\Users\zhaor\OneDrive - McMaster University\COMPSCI 4AL3\Final Project\NY-electricity-load-prediction\data\Prepared data\{}_features.csv".format(str(year)))
+    #     df_list.append(df)
+    # df_train_raw = pd.concat(df_list, axis=0, ignore_index=True)
+    # df_train = df_train_raw[['timestamp', 'load', 'temp']].copy()
+    # del df_list, df, df_train_raw
+
+    # print('Reading test data...')
+    # df_test_raw = pd.read_csv(r"C:\Users\zhaor\OneDrive - McMaster University\COMPSCI 4AL3\Final Project\NY-electricity-load-prediction\data\Prepared data\2020_features.csv")
+    # df_test = df_test_raw[['timestamp', 'load', 'temp']].copy()
+    # del df_test_raw
 
     print('Preprocessing data...')
     processing = Preprocessor()
@@ -526,7 +494,7 @@ if __name__ == "__main__":
     np.save('test_data.npy', test_np) # save test data for later use
     del test_np, df_test
 
-    # Initializing LSTM model and training
+    print('Initializing models and training...')
     lstm_model = SimpleLSTM(num_features, output_seq_len, hidden_size, num_layers, drop_rate=drop_rate).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(lstm_model.parameters(), lr=lr_rate, weight_decay=weight_decay)
@@ -542,9 +510,10 @@ if __name__ == "__main__":
         verbose=True, 
         scheduler=scheduler,
         device=device, 
-        save_model='last', 
+        save_model='last',
         save_as='LSTM.pt'
     )
+    print('LSTM model training completed, model saved as LSTM.pt.')
     plot_metrics(train_losses, val_losses, 'Loss')
 
     gru_model = SimpleGRU(num_features, output_seq_len, hidden_size, num_layers).to(device)
@@ -565,6 +534,7 @@ if __name__ == "__main__":
         save_model='last',
         save_as='GRU.pt'
     )
+    print('GRU model training completed, model saved as GRU.pt.')
     plot_metrics(train_losses, val_losses, 'Loss')
 
 
