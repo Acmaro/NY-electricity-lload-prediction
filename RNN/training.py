@@ -440,7 +440,7 @@ if __name__ == "__main__":
     lr_rate = 1e-4
     weight_decay = 1e-4
 
-    year_list = [2015, 2016, 2017, 2018, 2019, 2020]
+    year_list = [2024]
     
     print('NYISO load data downloading...')
     for year in year_list:
@@ -458,7 +458,8 @@ if __name__ == "__main__":
     df_train = pd.concat(df_list[:-1], axis=0, ignore_index=True)
     df_test = df_list[-1]
     del df_list, df
-
+    
+    quit()
     # df_train.to_csv('train_data.csv', index=False)
     # df_test.to_csv('test_data.csv', index=False)
 
