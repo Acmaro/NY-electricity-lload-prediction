@@ -33,6 +33,7 @@ import urllib
 import urllib.request
 from datetime import timedelta
 
+
 def unzip(source_filename,dest_dir):
     with zipfile.ZipFile(source_filename) as zf:
         try:
@@ -288,10 +289,10 @@ def create_dataset_splits(df_all, preprocessor, start_year, end_year, input_seq_
 
     return train_loader, val_loader
 
-def data_preprocess(year):
+def data_preprocess(year, wd):
 
-    loads = pd.read_csv(f'/home/zitong/Projects/NY-electricity-load-prediction/RNN/data/Prepared data/capitl_{year}.csv')
-    weather = pd.read_csv(f'/home/zitong/Projects/NY-electricity-load-prediction/RNN/data/Prepared data/{year}_weather_data.csv')
+    loads = pd.read_csv(f'{wd}/data/Prepared data/capitl_{year}.csv')
+    weather = pd.read_csv(f'{wd}/data/Prepared data/{year}_weather_data.csv')
     
     weather = weather.rename(columns={"valid_time_gmt": "timestamp"})
     
@@ -315,8 +316,11 @@ def data_preprocess(year):
     df['day'] = df['timestamp'].dt.day
     df['hour'] = df['timestamp'].dt.hour
     df['minute'] = df['timestamp'].dt.minute
+    
+    # sort by timestamp
+    df = df.sort_values('timestamp').reset_index(drop=True)
 
-    df.to_csv(f'./{year}_features.csv',encoding='utf-8-sig', index=False)
+    df.to_csv(f'{wd}/data/Prepared data/{year}_features.csv',encoding='utf-8-sig', index=False)
     return df
 
 # Model Implementation
@@ -397,14 +401,11 @@ def plot_metrics(train_metrics, test_metrics, metric_name):
     plt.tight_layout()
     plt.show()
 
-# initialize preprocessor for normalization on validation data later on
-preprocessor = Preprocessor()
-
-# specify year range
-start_year = 2019 # start_year to (end_year - 1) will be used for training
-end_year = 2022 # will be used for validation
-
 def train_model(config):
+    start_year = config['start_year']
+    end_year = config['end_year']
+    preprocessor = config['preprocessor']
+    wd = config['wd'] # working directory
     batch_size = config["batch_size"]
     hidden_size = config["hidden_size"]
     num_layers = config["num_layers"]
@@ -443,7 +444,7 @@ def train_model(config):
 
     df_list = []
     for year in range(2019, 2022 + 1):
-        df = data_preprocess(year)
+        df = data_preprocess(year, wd)
         df_list.append(df)
     df_raw = pd.concat(df_list, axis=0, ignore_index=True)
     del df_list, df
@@ -511,19 +512,6 @@ if __name__ == "__main__":
     print('Weather data downloading...')
     for year in year_list:
         download_weather_data(year)
-    
-    # save processed test data as .npy
-    df_val = data_preprocess(2022)
-    df_val = df_val[['timestamp', 'load', 'temp', 'year', 'month', 'day', 'hour', 'minute']].copy()
-    preprocessing = Preprocessor()
-    preprocessing.load_mean = preprocessor.load_mean
-    preprocessing.load_std = preprocessor.load_std
-    preprocessing.temp_mean = preprocessor.temp_mean
-    preprocessing.temp_std = preprocessor.temp_std
-    df_val = preprocessing.fit_transform(df_val)
-    df_val = df_val.drop('timestamp', axis=1)
-    np.save('data/test_data.npy', df_val.to_numpy())
-    del df_val
 
     # df_train.to_csv('train_data.csv', index=False)
     # df_test.to_csv('test_data.csv', index=False)
@@ -545,6 +533,8 @@ if __name__ == "__main__":
     # df_test = df_test_raw[['timestamp', 'load', 'temp']].copy()
     # del df_test_raw
 
+    preprocessor = Preprocessor()
+
     config = {
         "batch_size": tune.choice([32, 64, 128, 256]),
         "hidden_size": tune.choice([16, 32, 64, 128]),
@@ -553,7 +543,11 @@ if __name__ == "__main__":
         "lr_rate": tune.loguniform(1e-5, 1e-3),
         "weight_decay": tune.loguniform(1e-6, 1e-3),
         "model_type": tune.choice(["LSTM", "GRU"]),
-        "num_gpus": 1
+        "num_gpus": 1,
+        "wd": os.getcwd(),
+        "preprocessor": preprocessor,
+        "start_year": 2019,
+        "end_year": 2022
     }
 
     scheduler = ASHAScheduler(
@@ -574,6 +568,19 @@ if __name__ == "__main__":
     best_trial = result.get_best_trial("val_loss", "min", "last")
     print(f"Best trial config: {best_trial.config}")
     print(f"Best trial final validation loss: {best_trial.last_result['val_loss']}")
+
+    # save processed test data as .npy
+    df_val_raw = pd.read_csv(f'./data/Prepared data/2022_features.csv')
+    df_val = df_val_raw[['timestamp', 'load', 'temp', 'year', 'month', 'day', 'hour', 'minute']].copy()
+    preprocessing = Preprocessor()
+    preprocessing.load_mean = preprocessor.load_mean
+    preprocessing.load_std = preprocessor.load_std
+    preprocessing.temp_mean = preprocessor.temp_mean
+    preprocessing.temp_std = preprocessor.temp_std
+    df_val = preprocessing.fit_transform(df_val)
+    df_val = df_val.drop('timestamp', axis=1)
+    np.save('test_data.npy', df_val.to_numpy())
+    del df_val
 
 
 

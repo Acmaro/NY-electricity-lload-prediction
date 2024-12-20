@@ -113,31 +113,24 @@ if __name__ == "__main__":
 
     # Load trained models
     best_trained_model = SimpleGRU(8, 288, 32, 3).to('cuda')
-    print(best_trained_model.parameters())
-    data_path = "data.pkl"
+    data_path = "best_model.pkl"
     with open(data_path, "rb") as fp:
         best_checkpoint_data = pickle.load(fp)
-        print(best_checkpoint_data["net_state_dict"])
     best_trained_model.load_state_dict(best_checkpoint_data["net_state_dict"])
 
     predictions, actual = make_predictions(best_trained_model, test_tensor, device="cuda")
     
     scores = evaluate_metrics(actual, predictions)
-    print(f'LSTM: MAE {scores[0]}, MAPE {scores[1]}, R^2 {scores[2]}')
+    print(f'Predictions: MAE {scores[0]}, MAPE {scores[1]}, R^2 {scores[2]}')
 
-    font = {'family' : 'monospace',
-            'weight' : 'normal',
-            'size'   : 22}
-
-    plt.rc('font', **font)
-
-    time_interval = pd.date_range(start="2020-01-02", periods=len(actual), freq='5min')
+    time_interval = pd.date_range(start="2022-01-02", periods=len(actual), freq='5min')
     plt.figure(figsize=(40,10))
     plt.plot(time_interval, actual, label='Actual')
     plt.plot(time_interval, predictions, label='Predicted')
-    plt.legend()
+    plt.legend(fontsize=15)
     plt.grid(True)
-    plt.xlabel('Time')
-    plt.ylabel('Load')
-    plt.title('Actual & Predicted Loads over Time')
+    plt.xlabel('Time', fontsize=15)
+    plt.ylabel('Load', fontsize=15)
+    plt.title('Actual & Predicted Loads over Time', fontsize=20)
+    plt.savefig('best_model.png')
     plt.show()
