@@ -1,4 +1,5 @@
 import torch
+import pickle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -45,7 +46,7 @@ def make_predictions(model, test_data, device='cuda'):
     model : torch.nn.Module
         The trained model that takes an input of shape [1, 288, 7] and outputs [1, 288].
     test_data : torch.Tensor
-        A tensor of shape [N, 7] containing continuous test data for 2020.
+        A tensor of shape [N, 7] containing continuous test data.
         The columns are [load, temp, is_workday, year, month, day, hour].
         Assume test_data is normalized/processed the same way as the training data.
     device : str, optional
@@ -102,34 +103,27 @@ def make_predictions(model, test_data, device='cuda'):
 
 if __name__ == "__main__":
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
     # Parameters for data preprocessing
     input_seq_len = 288
     output_seq_len = 288
-    batch_size = 128
-    # Parameters for model initialization and training
-    num_features = 8
-    hidden_size = 32
-    num_layers = 2
-
-    lstm_model = SimpleLSTM(num_features, output_seq_len, hidden_size, num_layers).to(device)
-    lstm_model.load_state_dict(torch.load('LSTM.pt', weights_only=True))
-
-    gru_model = SimpleGRU(num_features, output_seq_len, hidden_size, num_layers).to(device)
-    gru_model.load_state_dict(torch.load('GRU.pt', weights_only=True))
 
     # Load test data
     test_np = np.load('test_data.npy')
     test_tensor = torch.tensor(test_np, dtype=torch.float32)
 
-    predictions_lstm, actual = make_predictions(lstm_model, test_tensor, device=device)
-    predictions_gru, _ = make_predictions(gru_model, test_tensor, device=device)
+    # Load trained models
+    best_trained_model = SimpleGRU(8, 288, 32, 3).to('cuda')
+    print(best_trained_model.parameters())
+    data_path = "data.pkl"
+    with open(data_path, "rb") as fp:
+        best_checkpoint_data = pickle.load(fp)
+        print(best_checkpoint_data["net_state_dict"])
+    best_trained_model.load_state_dict(best_checkpoint_data["net_state_dict"])
 
-    lstm_scores = evaluate_metrics(actual, predictions_lstm)
-    print(f'LSTM: MAE {lstm_scores[0]}, MAPE {lstm_scores[1]}, R^2 {lstm_scores[2]}')
-    gru_scores = evaluate_metrics(actual, predictions_gru)
-    print(f'GRU: MAE {gru_scores[0]}, MAPE {gru_scores[1]}, R^2 {gru_scores[2]}')
+    predictions, actual = make_predictions(best_trained_model, test_tensor, device="cuda")
+    
+    scores = evaluate_metrics(actual, predictions)
+    print(f'LSTM: MAE {scores[0]}, MAPE {scores[1]}, R^2 {scores[2]}')
 
     font = {'family' : 'monospace',
             'weight' : 'normal',
@@ -140,9 +134,7 @@ if __name__ == "__main__":
     time_interval = pd.date_range(start="2020-01-02", periods=len(actual), freq='5min')
     plt.figure(figsize=(40,10))
     plt.plot(time_interval, actual, label='Actual')
-    # plt.plot(time_interval, predictions_rnn, label='Predicted (RNN)')
-    plt.plot(time_interval, predictions_lstm, label='Predicted (LSTM)')
-    plt.plot(time_interval, predictions_gru, label='Predicted (GRU)')
+    plt.plot(time_interval, predictions, label='Predicted')
     plt.legend()
     plt.grid(True)
     plt.xlabel('Time')

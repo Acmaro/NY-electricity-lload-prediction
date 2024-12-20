@@ -1,26 +1,36 @@
-import datetime
-import holidays
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.preprocessing import StandardScaler
-from sklearn.impute import SimpleImputer
-from sklearn.neighbors import NearestNeighbors
+from functools import partial
+import os
+import tempfile
+from pathlib import Path
+import pandas as pd
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
+import matplotlib.pyplot as plt
+import datetime
+import holidays
 
-import os
-import pandas as pd
-import numpy as np
+from sklearn.neighbors import NearestNeighbors
+from sklearn.impute import SimpleImputer
+from sklearn.base import BaseEstimator, TransformerMixin
+from torch.utils.data import Dataset, DataLoader
+
+from ray import tune
+from ray import train
+from ray.train import Checkpoint, get_checkpoint
+from ray.tune.schedulers import ASHAScheduler
+import ray.cloudpickle as pickle
+from torch.amp import GradScaler, autocast
+scaler = GradScaler()
+
 import requests
 import zipfile
-import io
 import matplotlib.pyplot as plt
 import urllib
 import urllib.request
-import json
-import time
 from datetime import timedelta
 
 def unzip(source_filename,dest_dir):
@@ -167,16 +177,10 @@ class TimestampTransformer(BaseEstimator, TransformerMixin):
 
         X['timestamp'] = pd.to_datetime(X['timestamp'])
         X['is_workday'] = X['timestamp'].apply(is_workday)
-        X['year'] = X['timestamp'].dt.year
-        X['month'] = X['timestamp'].dt.month
-        X['day'] = X['timestamp'].dt.day
-        X['hour'] = X['timestamp'].dt.hour
-        X['minute'] = X['timestamp'].dt.minute
-        X = X.drop('timestamp', axis=1)
         return X
-
+    
 class TimeSeriesDataset(Dataset):
-    def __init__(self, df, seq_len, pred_len=1, transform=None, target_transform=None):
+    def __init__(self, df, seq_len, pred_len):
         """
         Custom Dataset for multivariate time series.
 
@@ -186,7 +190,7 @@ class TimeSeriesDataset(Dataset):
             transform: Composition of transformations.
         """
         super(TimeSeriesDataset, self).__init__()
-        self.df = df
+        self.df = df.reset_index(drop=True)
         self.features = self.df.values
         self.targets = self.df['load'].values
         self.seq_len = seq_len
@@ -205,49 +209,89 @@ class TimeSeriesDataset(Dataset):
         return sequence, target
 
 class Preprocessor():
-
     def __init__(self):
         self.timestamp_transformer = TimestampTransformer()
         self.imputer_load = SimpleImputer(strategy='mean')
         self.imputer_temp = SimpleImputer(strategy='mean')
-        self.scaler_load = StandardScaler()
-        self.scaler_temp = StandardScaler()
+
+        self.min_year = None
+        
+        self.load_mean = None
+        self.load_std  = None
+        self.temp_mean = None
+        self.temp_std  = None
+        self.feature_cols = ['load', 'temp', 'is_workday', 'year', 'month', 'day', 'hour', 'minute']
 
     def fit(self, df):
 
-        self.imputer_load = self.imputer_load.fit(df[['load']])
-        self.imputer_temp = self.imputer_temp.fit(df[['temp']])
-        self.scaler_load = self.scaler_load.fit(df[['load']])
-        self.scaler_temp = self.scaler_temp.fit(df[['temp']])
+        self.imputer_load.fit(df[['load']])
+        self.imputer_temp.fit(df[['temp']])
+
+        self.min_year = df['year'].min()
+
+        self.load_mean = df['load'].mean()
+        self.load_std  = df['load'].std()
+        self.temp_mean = df['temp'].mean()
+        self.temp_std  = df['temp'].std()
 
     def transform(self, df):
 
         df = self.timestamp_transformer.transform(df)
+
         df['load'] = self.imputer_load.transform(df[['load']])
         df['temp'] = self.imputer_temp.transform(df[['temp']])
-        df['load'] = self.scaler_load.transform(df[['load']])
-        df['temp'] = self.scaler_temp.transform(df[['temp']])
+
+        df['year'] = df['year'] - self.min_year
+
+        df['load'] = (df['load'] - self.load_mean) / self.load_std
+        df['temp'] = (df['temp'] - self.temp_mean) / self.temp_std
+
+        return df
+    
+    def inverse_transform(self, df):
+        
+        df['load'] = df['load'] * self.load_std + self.load_mean
 
         return df
 
-    def fit_transform(self, df, input_seq_len, output_seq_len, batch_size, train_size=0.8):
-        
+    def fit_transform(self, df):
         self.fit(df)
-        df = self.transform(df)
-        dataset = TimeSeriesDataset(df, input_seq_len, output_seq_len)
-        train_size = int(train_size * len(dataset))
-        train_dataset = torch.utils.data.Subset(dataset, range(train_size))
-        test_dataset = torch.utils.data.Subset(dataset, range(train_size, len(dataset)))
+        df_out = self.transform(df)
+        return df_out
 
-        train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size, shuffle=False)
+def create_dataset_splits(df_all, preprocessor, start_year, end_year, input_seq_len, output_seq_len, batch_size):
+    """
+    Specify the year range `start_year` and `end_year` (inclusive) for training and validation data. The end year will be used as the validation data.
+    """
+    df_all = df_all.sort_values('timestamp').reset_index(drop=True)
 
-        return train_loader, test_loader
+    preprocessor = preprocessor
+    df_all = preprocessor.fit_transform(df_all)
+
+    if start_year + 1 == end_year:
+        df_train = df_all[df_all['timestamp'].dt.year == start_year].copy().reset_index(drop=True)
+    elif start_year + 1 < end_year:
+        df_train = df_all[(df_all['timestamp'].dt.year >= start_year) & (df_all['timestamp'].dt.year <= end_year-1)].copy().reset_index(drop=True)
+    else:
+        raise ValueError('Invalid year range.')
+    df_val = df_all[df_all['timestamp'].dt.year == end_year].copy().reset_index(drop=True)
+
+    df_train = df_train.drop('timestamp', axis=1)
+    df_val = df_val.drop('timestamp', axis=1)
+
+    train_dataset = TimeSeriesDataset(df_train, input_seq_len, output_seq_len)
+    val_dataset  = TimeSeriesDataset(df_val, input_seq_len, output_seq_len)
+
+    # For Windows users, set num_workers=0; For Linux users, set num_workers=num_CPU_cores
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True, pin_memory_device='cuda')
+    val_loader  = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True, pin_memory_device='cuda')
+
+    return train_loader, val_loader
 
 def data_preprocess(year):
 
-    loads = pd.read_csv(f'data/Prepared data/capitl_{year}.csv')
-    weather = pd.read_csv(f'data/Prepared data/{year}_weather_data.csv')
+    loads = pd.read_csv(f'/home/zitong/Projects/NY-electricity-load-prediction/RNN/data/Prepared data/capitl_{year}.csv')
+    weather = pd.read_csv(f'/home/zitong/Projects/NY-electricity-load-prediction/RNN/data/Prepared data/{year}_weather_data.csv')
     
     weather = weather.rename(columns={"valid_time_gmt": "timestamp"})
     
@@ -265,7 +309,13 @@ def data_preprocess(year):
     
     full = loads.merge(weather, left_on='nearesttime', right_on='timestamp')
     df = full[['timestamp_x', 'load', 'temp']].rename(columns={'timestamp_x': 'timestamp'})
-        
+    
+    df['year'] = df['timestamp'].dt.year
+    df['month'] = df['timestamp'].dt.month
+    df['day'] = df['timestamp'].dt.day
+    df['hour'] = df['timestamp'].dt.hour
+    df['minute'] = df['timestamp'].dt.minute
+
     df.to_csv(f'./{year}_features.csv',encoding='utf-8-sig', index=False)
     return df
 
@@ -280,29 +330,6 @@ class SimpleLSTM(nn.Module):
         self.lstm = nn.LSTM(num_features, hidden_size, num_layers, dropout=drop_rate, batch_first=True)
         
         self.fc = nn.Linear(hidden_size, output_size)
-    
-    # def _initialize_weights(self, num_features):
-    #     # According to the paper, https://arxiv.org/pdf/1912.10454
-    #     #   we want to preserve the variance through layers.
-    #     # As a simplified approach:
-    #     # - Set all biases to zero
-    #     # - Initialize input-to-hidden weights with a variance ~ 1/N, where N is the number of features
-    #     # - Initialize hidden-to-hidden weights orthogonally or with a small variance
-        
-    #     for name, param in self.lstm.named_parameters():
-    #         if 'bias' in name:
-    #             nn.init.zeros_(param)
-    #         elif 'weight_ih' in name:
-    #             # Input to hidden weights: normal with std ~ 1/sqrt(num_features)
-    #             nn.init.normal_(param, mean=0.0, std=(1.0 / np.sqrt(num_features)))
-    #         elif 'weight_hh' in name:
-    #             # Hidden to hidden weights: orthogonal initialization can help stability
-    #             nn.init.orthogonal_(param)
-
-    #     # For the fully connected layer
-    #     nn.init.zeros_(self.fc.bias)
-    #     # Xavier is a reasonable choice for the final layer
-    #     nn.init.xavier_normal_(self.fc.weight)
 
     def forward(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
@@ -355,59 +382,6 @@ def model_evaluation(model, criterion, data_loader, device='cpu'):
 
     return loss_mean
 
-def training_loop(n_epochs, optimizer, model, criterion, train_loader, test_loader, verbose=False, scheduler=None, device='cpu', save_model=None, save_as='model.pt'):
-    '''
-    Set `verbose=True` to see scores for each epoch. If cuda is available, set `device='cuda'`.
-
-    Return
-    ------
-    - train_losses (list): history of training loss
-    - test_losses (list): history of test/validation loss
-    '''
-    train_losses = []
-    test_losses = []
-
-    min_test_loss = float('inf')
-    for n in range(n_epochs):
-        for x_batch, y_batch in train_loader:
-
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
-
-            optimizer.zero_grad(set_to_none=True)
-            outputs = model(x_batch)
-            loss = criterion(outputs, y_batch)
-
-            loss.backward()
-            optimizer.step()
-        
-        if scheduler != None:
-            scheduler.step() # update learning rate
-        
-        train_loss = model_evaluation(model, criterion, train_loader, device=device)
-        test_loss = model_evaluation(model, criterion, test_loader, device=device)
-
-        # save model with lowest test/validation loss
-        if test_loss < min_test_loss:
-            min_test_loss = test_loss
-            if save_model == 'best':
-                torch.save(model.state_dict(), save_as)
-
-        # save model at last epoch
-        if save_model == 'last' and n == n_epochs - 1:
-            torch.save(model.state_dict(), save_as)
-
-        train_losses.append(train_loss)
-        test_losses.append(test_loss)
-
-        if ((n + 1) % 10 == 0) or verbose:
-            print(f'Epoch {n + 1}/{n_epochs}: Training loss {train_loss:.4f}, Validation Loss {test_loss:.4f}')
-            if scheduler != None:
-                print(f"Current learning rate is {scheduler.get_last_lr()[0]}")
-            print('----------------------------------------------------------')
-
-    return train_losses, test_losses
-
 def plot_metrics(train_metrics, test_metrics, metric_name):
     plt.figure(figsize=(8, 6))
     epochs = np.arange(len(train_metrics))
@@ -423,24 +397,113 @@ def plot_metrics(train_metrics, test_metrics, metric_name):
     plt.tight_layout()
     plt.show()
 
+# initialize preprocessor for normalization on validation data later on
+preprocessor = Preprocessor()
+
+# specify year range
+start_year = 2019 # start_year to (end_year - 1) will be used for training
+end_year = 2022 # will be used for validation
+
+def train_model(config):
+    batch_size = config["batch_size"]
+    hidden_size = config["hidden_size"]
+    num_layers = config["num_layers"]
+    drop_rate = config["drop_rate"]
+    lr_rate = config["lr_rate"]
+    weight_decay = config["weight_decay"]
+    model_type = config["model_type"]
+
+    if model_type == 'LSTM':
+        model = SimpleLSTM(num_features=8, output_size=288, hidden_size=hidden_size, num_layers=num_layers, drop_rate=drop_rate)
+    elif model_type == 'GRU':
+        model = SimpleGRU(num_features=8, output_size=288, hidden_size=hidden_size, num_layers=num_layers, drop_rate=drop_rate)
+
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+    model.to(device)
+
+    criterion = nn.HuberLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr_rate, weight_decay=weight_decay, fused=True)
+
+    checkpoint = get_checkpoint()
+    if checkpoint:
+        with checkpoint.as_directory() as checkpoint_dir:
+            data_path = Path(checkpoint_dir) / "data.pkl"
+            with open(data_path, "rb") as fp:
+                checkpoint_state = pickle.load(fp)
+            start_epoch = checkpoint_state["epoch"]
+            model.load_state_dict(checkpoint_state["net_state_dict"])
+            optimizer.load_state_dict(checkpoint_state["optimizer_state_dict"])
+    else:
+        start_epoch = 0
+    
+
+    df_list = []
+    for year in range(2019, 2022 + 1):
+        df = data_preprocess(year)
+        df_list.append(df)
+    df_raw = pd.concat(df_list, axis=0, ignore_index=True)
+    del df_list, df
+
+    df = df_raw[['timestamp', 'load', 'temp', 'year', 'month', 'day', 'hour', 'minute']].copy()
+    del df_raw
+
+    # create train and validation data loaders
+    train_loader, val_loader = create_dataset_splits(df, preprocessor=preprocessor, start_year=start_year, end_year=end_year, input_seq_len=288, output_seq_len=288, batch_size=batch_size)
+
+    scheduler = None
+
+    for epoch in range(start_epoch, 1):
+        model.train()
+        for x_batch, y_batch in train_loader:
+
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(device=='cuda')):
+                outputs = model(x_batch)
+                loss = criterion(outputs, y_batch)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        
+        if scheduler is not None:
+            scheduler.step()
+
+        # Train/Validation losses
+        train_loss = model_evaluation(model, criterion, train_loader, device=device)
+        val_loss = model_evaluation(model, criterion, val_loader, device=device)
+
+        checkpoint_data = {
+            "epoch": epoch,
+            "net_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        }
+        with tempfile.TemporaryDirectory() as checkpoint_dir:
+            data_path = Path(checkpoint_dir) / "data.pkl"
+            with open(data_path, "wb") as fp:
+                pickle.dump(checkpoint_data, fp)
+
+            checkpoint = Checkpoint.from_directory(checkpoint_dir)
+            train.report(
+                {"train_loss": train_loss, "val_loss": val_loss},
+                checkpoint=checkpoint,
+            )
+
+    print("Finished Training")
+
 if __name__ == "__main__":
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-    # Parameters for data preprocessing
+    # Specify model input and ouput sequence length
     input_seq_len = 288
     output_seq_len = 288
-    batch_size = 128
-    # Parameters for model initialization and training
-    num_features = 8
-    hidden_size = 32
-    num_layers = 2
-    num_epochs = 30
-    drop_rate = 0.3
-    lr_rate = 1e-4
-    weight_decay = 1e-4
 
-    year_list = [2024]
+    year_list = [2019, 2020, 2021, 2022, 2023]
     
     print('NYISO load data downloading...')
     for year in year_list:
@@ -448,18 +511,20 @@ if __name__ == "__main__":
     print('Weather data downloading...')
     for year in year_list:
         download_weather_data(year)
-    print('Combining load and weather data...')
     
-    df_list = []
-    for year in year_list:
-        df = data_preprocess(year)
-        df_list.append(df)
+    # save processed test data as .npy
+    df_val = data_preprocess(2022)
+    df_val = df_val[['timestamp', 'load', 'temp', 'year', 'month', 'day', 'hour', 'minute']].copy()
+    preprocessing = Preprocessor()
+    preprocessing.load_mean = preprocessor.load_mean
+    preprocessing.load_std = preprocessor.load_std
+    preprocessing.temp_mean = preprocessor.temp_mean
+    preprocessing.temp_std = preprocessor.temp_std
+    df_val = preprocessing.fit_transform(df_val)
+    df_val = df_val.drop('timestamp', axis=1)
+    np.save('data/test_data.npy', df_val.to_numpy())
+    del df_val
 
-    df_train = pd.concat(df_list[:-1], axis=0, ignore_index=True)
-    df_test = df_list[-1]
-    del df_list, df
-    
-    quit()
     # df_train.to_csv('train_data.csv', index=False)
     # df_test.to_csv('test_data.csv', index=False)
 
@@ -480,63 +545,35 @@ if __name__ == "__main__":
     # df_test = df_test_raw[['timestamp', 'load', 'temp']].copy()
     # del df_test_raw
 
-    print('Preprocessing data...')
-    processing = Preprocessor()
-    train_loader, val_loader = processing.fit_transform(
-        df=df_train,
-        input_seq_len=input_seq_len,
-        output_seq_len=output_seq_len,
-        batch_size=batch_size
+    config = {
+        "batch_size": tune.choice([32, 64, 128, 256]),
+        "hidden_size": tune.choice([16, 32, 64, 128]),
+        "num_layers": tune.choice([2, 3, 4, 5]),
+        "drop_rate": tune.uniform(0.0, 0.5),
+        "lr_rate": tune.loguniform(1e-5, 1e-3),
+        "weight_decay": tune.loguniform(1e-6, 1e-3),
+        "model_type": tune.choice(["LSTM", "GRU"]),
+        "num_gpus": 1
+    }
+
+    scheduler = ASHAScheduler(
+            metric="val_loss",
+            mode="min",
+            max_t=30,
+            grace_period=10,
+            reduction_factor=2,
     )
-
-    print('Saving test data...')
-    df_test = processing.transform(df_test)
-    test_np = df_test.to_numpy(dtype=np.float32)
-    np.save('test_data.npy', test_np) # save test data for later use
-    del test_np, df_test
-
-    print('Initializing models and training...')
-    lstm_model = SimpleLSTM(num_features, output_seq_len, hidden_size, num_layers, drop_rate=drop_rate).to(device)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(lstm_model.parameters(), lr=lr_rate, weight_decay=weight_decay)
-    scheduler = StepLR(optimizer, step_size=20, gamma=0.5)
-
-    train_losses, val_losses = training_loop(
-        num_epochs, 
-        optimizer, 
-        lstm_model, 
-        criterion, 
-        train_loader, 
-        val_loader, 
-        verbose=True, 
+    result = tune.run(
+        partial(train_model),
+        resources_per_trial={"cpu": 8, "gpu": 1},
+        config=config,
+        num_samples=1,
         scheduler=scheduler,
-        device=device, 
-        save_model='last',
-        save_as='LSTM.pt'
     )
-    print('LSTM model training completed, model saved as LSTM.pt.')
-    plot_metrics(train_losses, val_losses, 'Loss')
 
-    gru_model = SimpleGRU(num_features, output_seq_len, hidden_size, num_layers).to(device)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(gru_model.parameters(), lr=lr_rate, weight_decay=weight_decay)
-    scheduler = StepLR(optimizer, step_size=20, gamma=0.5)
-
-    train_losses, val_losses = training_loop(
-        num_epochs, 
-        optimizer, 
-        gru_model, 
-        criterion, 
-        train_loader, 
-        val_loader, 
-        verbose=True, 
-        scheduler=scheduler,
-        device='cuda', 
-        save_model='last',
-        save_as='GRU.pt'
-    )
-    print('GRU model training completed, model saved as GRU.pt.')
-    plot_metrics(train_losses, val_losses, 'Loss')
+    best_trial = result.get_best_trial("val_loss", "min", "last")
+    print(f"Best trial config: {best_trial.config}")
+    print(f"Best trial final validation loss: {best_trial.last_result['val_loss']}")
 
 
 
