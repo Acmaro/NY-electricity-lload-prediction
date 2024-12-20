@@ -109,18 +109,8 @@ if __name__ == "__main__":
     output_seq_len = 288
 
     # Load test data
-    df_list = []
-    for year in range(2022, 2023):
-        df = pd.read_csv(f'data/Prepared data/{year}_features.csv')
-        df_list.append(df)
-    df_all = pd.concat(df_list, axis=0, ignore_index=True)
-    preprocessor = Preprocessor()
-    df_all = preprocessor.fit_transform(df_all)
-    df_val = df_all[df_all['timestamp'].dt.year == 2022].copy().reset_index(drop=True)
-    df_val = df_val.drop('timestamp', axis=1)
-    test_tensor = torch.tensor(df_val.values, dtype=torch.float32)
-    # test_np = np.load('data/test_data.npy')
-    # test_tensor = torch.tensor(test_np, dtype=torch.float32)
+    test_np = np.load('test_data_for_submission.npy')
+    test_tensor = torch.tensor(test_np, dtype=torch.float32)
 
     # Load trained models
     best_trained_model = SimpleGRU(8, 288, 32, 3).to('cuda')

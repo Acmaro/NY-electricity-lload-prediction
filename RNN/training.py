@@ -563,9 +563,9 @@ if __name__ == "__main__":
     )
     result = tune.run(
         partial(train_model),
-        resources_per_trial={"cpu": 8, "gpu": 1},
+        resources_per_trial={"cpu": 1, "gpu": 1},
         config=config,
-        num_samples=1,
+        num_samples=20,
         scheduler=scheduler,
     )
 
@@ -583,7 +583,7 @@ if __name__ == "__main__":
     # df_all = preprocessor.fit_transform(df_all)
     # df_val = df_all[df_all['timestamp'].dt.year == 2022].copy().reset_index(drop=True)
     # df_val = df_val.drop('timestamp', axis=1)
-    # np.save('test_data.npy', df_val.to_numpy())
+    # np.save('./data/test_data.npy', df_val.to_numpy())
 
 
 
