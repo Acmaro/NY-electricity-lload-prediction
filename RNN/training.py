@@ -461,7 +461,7 @@ def train_model(config):
 
     scheduler = None
 
-    for epoch in range(start_epoch, 1):
+    for epoch in range(start_epoch, 30):
         model.train()
         for x_batch, y_batch in train_loader:
 
