@@ -266,8 +266,12 @@ def create_dataset_splits(df_all, preprocessor, start_year, end_year, input_seq_
     """
     df_all = df_all.sort_values('timestamp').reset_index(drop=True)
 
-    preprocessor = preprocessor
     df_all = preprocessor.fit_transform(df_all)
+
+    # save end_year data as .npy
+    df_val = df_all[df_all['timestamp'].dt.year == end_year].copy().reset_index(drop=True)
+    df_val = df_val.drop('timestamp', axis=1)
+    np.save('test_data.npy', df_val.to_numpy())
 
     if start_year + 1 == end_year:
         df_train = df_all[df_all['timestamp'].dt.year == start_year].copy().reset_index(drop=True)
@@ -570,17 +574,16 @@ if __name__ == "__main__":
     print(f"Best trial final validation loss: {best_trial.last_result['val_loss']}")
 
     # save processed test data as .npy
-    df_val_raw = pd.read_csv(f'./data/Prepared data/2022_features.csv')
-    df_val = df_val_raw[['timestamp', 'load', 'temp', 'year', 'month', 'day', 'hour', 'minute']].copy()
-    preprocessing = Preprocessor()
-    preprocessing.load_mean = preprocessor.load_mean
-    preprocessing.load_std = preprocessor.load_std
-    preprocessing.temp_mean = preprocessor.temp_mean
-    preprocessing.temp_std = preprocessor.temp_std
-    df_val = preprocessing.fit_transform(df_val)
-    df_val = df_val.drop('timestamp', axis=1)
-    np.save('test_data.npy', df_val.to_numpy())
-    del df_val
+    # df_list = []
+    # for year in range(2019, 2023):
+    #     df = pd.read_csv(f'data/Prepared data/{year}_features.csv')
+    #     df_list.append(df)
+    # df_all = pd.concat(df_list, axis=0, ignore_index=True)
+    # preprocessor = Preprocessor()
+    # df_all = preprocessor.fit_transform(df_all)
+    # df_val = df_all[df_all['timestamp'].dt.year == 2022].copy().reset_index(drop=True)
+    # df_val = df_val.drop('timestamp', axis=1)
+    # np.save('test_data.npy', df_val.to_numpy())
 
 
 
